@@ -39,6 +39,14 @@ type Product = {
 };
 
 type ProductDraft = Omit<Product, "id">;
+type DashboardView = "inventory" | "suppliers" | "settings" | "plans";
+
+type SupplierSummary = {
+  name: string;
+  productCount: number;
+  units: number;
+  inventoryValue: number;
+};
 
 const EMPTY_DRAFT: ProductDraft = {
   name: "",
@@ -50,6 +58,14 @@ const EMPTY_DRAFT: ProductDraft = {
 };
 
 const MIN_STOCK_QUANTITY = 5;
+
+function getSavedStockThreshold(userId: string): number {
+  const savedThreshold = window.localStorage.getItem(`b2g-stock-threshold:${userId}`);
+  const parsedThreshold = Number(savedThreshold);
+  return savedThreshold && Number.isInteger(parsedThreshold) && parsedThreshold >= 0
+    ? parsedThreshold
+    : MIN_STOCK_QUANTITY;
+}
 
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -80,6 +96,9 @@ export default function Home() {
   const [savingProduct, setSavingProduct] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [activeView, setActiveView] = useState<DashboardView>("inventory");
+  const [minimumStockQuantity, setMinimumStockQuantity] = useState(MIN_STOCK_QUANTITY);
+  const [planNotice, setPlanNotice] = useState("");
 
   const loadProducts = useCallback(async () => {
     if (!supabase) return;
@@ -103,6 +122,9 @@ export default function Home() {
     supabase.auth.getSession().then(({ data, error }) => {
       if (error) setAuthError(error.message);
       setSession(data.session);
+      if (data.session) {
+        setMinimumStockQuantity(getSavedStockThreshold(data.session.user.id));
+      }
       if (data.session) void loadProducts();
       setAuthLoading(false);
     });
@@ -111,6 +133,9 @@ export default function Home() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
+      if (nextSession) {
+        setMinimumStockQuantity(getSavedStockThreshold(nextSession.user.id));
+      }
       setAuthError("");
       setAuthMessage("");
       if (!nextSession) setProducts([]);
@@ -253,9 +278,35 @@ export default function Home() {
     (sum, product) => sum + product.quantity * Number(product.unit_price),
     0,
   );
-  const stockAlerts = products.filter((product) => product.quantity < MIN_STOCK_QUANTITY);
+  const stockAlerts = products.filter(
+    (product) => product.quantity === 0 || product.quantity < minimumStockQuantity,
+  );
   const lowStock = stockAlerts.filter((product) => product.quantity > 0).length;
   const outOfStock = products.filter((product) => product.quantity === 0).length;
+  const suppliers = useMemo(() => {
+    const summaries = new Map<string, SupplierSummary>();
+    products.forEach((product) => {
+      const name = product.supplier.trim();
+      if (!name) return;
+      const current = summaries.get(name) ?? {
+        name,
+        productCount: 0,
+        units: 0,
+        inventoryValue: 0,
+      };
+      current.productCount += 1;
+      current.units += product.quantity;
+      current.inventoryValue += product.quantity * Number(product.unit_price);
+      summaries.set(name, current);
+    });
+    return Array.from(summaries.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [products]);
+
+  function navigateTo(view: DashboardView) {
+    setActiveView(view);
+    setMobileNavOpen(false);
+    setPlanNotice("");
+  }
 
   if (authLoading) {
     return (
@@ -332,18 +383,18 @@ export default function Home() {
         </div>
         <div className="nav-label">WORKSPACE</div>
         <nav className="main-nav" aria-label="Main navigation">
-          <a className="nav-item" href="#overview" onClick={() => setMobileNavOpen(false)}><LayoutDashboard size={18} /> Overview</a>
-          <a className="nav-item active" href="#inventory" onClick={() => setMobileNavOpen(false)}><Package size={18} /> Inventory <span className="nav-count">{products.length}</span></a>
-          <a className="nav-item" href="#suppliers" onClick={(event) => event.preventDefault()}><Truck size={18} /> Suppliers</a>
+          <button className="nav-item" type="button" onClick={() => navigateTo("inventory")}><LayoutDashboard size={18} /> Overview</button>
+          <button className={`nav-item ${activeView === "inventory" ? "active" : ""}`} type="button" onClick={() => navigateTo("inventory")}><Package size={18} /> Inventory <span className="nav-count">{products.length}</span></button>
+          <button className={`nav-item ${activeView === "suppliers" ? "active" : ""}`} type="button" onClick={() => navigateTo("suppliers")}><Truck size={18} /> Suppliers</button>
         </nav>
         <div className="sidebar-bottom">
           <div className="upgrade-card">
             <div className="upgrade-icon"><Sparkles size={15} /></div>
             <strong>Make more room to grow</strong>
             <p>Keep everything organized as your business scales.</p>
-            <button type="button" onClick={() => window.alert("You’re all set with B2G INVENTORY.")}>Explore B2G INVENTORY <ArrowUp size={14} /></button>
+            <button type="button" onClick={() => navigateTo("plans")}>Explore plans <ArrowUp size={14} /></button>
           </div>
-          <a className="nav-item" href="#settings" onClick={(event) => event.preventDefault()}><Settings size={18} /> Settings</a>
+          <button className={`nav-item ${activeView === "settings" ? "active" : ""}`} type="button" onClick={() => navigateTo("settings")}><Settings size={18} /> Settings</button>
           <span className="nav-item"><CircleHelp size={18} /> Help & support</span>
           <div className="profile-row">
             <div className="profile-avatar">{firstName.charAt(0).toUpperCase()}</div>
@@ -356,7 +407,7 @@ export default function Home() {
       <section className="main-content" id="overview">
         <header className="topbar">
           <button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}><Menu size={20} /></button>
-          <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>Inventory</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{activeView[0].toUpperCase() + activeView.slice(1)}</strong></div>
           <div className="topbar-right">
             <span className="today-label">{new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(new Date())}</span>
             <div className="notification-wrap">
@@ -373,7 +424,7 @@ export default function Home() {
               {notificationsOpen && (
                 <section className="notification-panel" aria-label="Stock notifications">
                   <div className="notification-heading">
-                    <div><strong>Stock alerts</strong><span>Minimum stock: {MIN_STOCK_QUANTITY} units</span></div>
+                    <div><strong>Stock alerts</strong><span>Minimum stock: {minimumStockQuantity} units</span></div>
                     <button className="icon-button" type="button" onClick={() => setNotificationsOpen(false)} aria-label="Close stock alerts"><X size={16} /></button>
                   </div>
                   {stockAlerts.length === 0 ? (
@@ -401,7 +452,8 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="page-content" id="inventory">
+        <div className="page-content" id={activeView}>
+          {activeView === "inventory" && <>
           <div className="page-heading">
             <div>
               <div className="eyebrow muted-eyebrow">YOUR STOCK, AT A GLANCE</div>
@@ -432,7 +484,7 @@ export default function Home() {
             <article className="stat-card">
               <div className="stat-top"><span className="stat-icon alert-icon"><AlertCircle size={17} /></span><span className={`stat-trend ${stockAlerts.length > 0 ? "warning" : "good"}`}>{stockAlerts.length > 0 ? "Needs attention" : "All clear"}</span></div>
               <div className="stat-value">{stockAlerts.length}</div><div className="stat-label">Low stock alerts</div>
-              <div className="stat-foot"><span className={`stat-dot ${stockAlerts.length > 0 ? "orange-dot" : "green-dot"}`} /> {outOfStock} out of stock · {lowStock} below {MIN_STOCK_QUANTITY} units</div>
+              <div className="stat-foot"><span className={`stat-dot ${stockAlerts.length > 0 ? "orange-dot" : "green-dot"}`} /> {outOfStock} out of stock · {lowStock} below {minimumStockQuantity} units</div>
             </article>
           </div>
 
@@ -462,16 +514,125 @@ export default function Home() {
                       <td><div className="product-cell"><div className={`product-avatar product-color-${index % 5}`}>{product.name.charAt(0).toUpperCase()}</div><strong>{product.name}</strong></div></td>
                       <td><span className="sku-text">{product.sku}</span></td><td><span className="category-pill">{product.category}</span></td><td className="supplier-text">{product.supplier || "—"}</td>
                       <td className="align-right price-cell">{money.format(Number(product.unit_price))}</td><td className="align-right quantity-cell">{product.quantity} <span>units</span></td>
-                      <td><StockStatus quantity={product.quantity} /></td>
+                      <td><StockStatus quantity={product.quantity} minimum={minimumStockQuantity} /></td>
                       <td><button className="row-edit" onClick={(event) => { event.stopPropagation(); openEditProduct(product); }} aria-label={`Edit ${product.name}`}><ChevronDown size={15} /></button></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <div className="table-footer"><span>Showing <strong>{filteredProducts.length ? 1 : 0}–{filteredProducts.length}</strong> of <strong>{products.length}</strong> products</span><span>Minimum stock: <strong>{MIN_STOCK_QUANTITY} units</strong></span></div>
+            <div className="table-footer"><span>Showing <strong>{filteredProducts.length ? 1 : 0}–{filteredProducts.length}</strong> of <strong>{products.length}</strong> products</span><span>Minimum stock: <strong>{minimumStockQuantity} units</strong></span></div>
           </section>
           <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><span><ShieldCheck size={13} /> Your inventory is private to your account</span></footer>
+          </>}
+
+          {activeView === "suppliers" && <>
+            <div className="page-heading">
+              <div>
+                <div className="eyebrow muted-eyebrow">YOUR SUPPLY NETWORK</div>
+                <h1>Suppliers</h1>
+                <p>See suppliers recorded on your products and the stock linked to each one.</p>
+              </div>
+              <button className="button button-primary add-button" type="button" onClick={openNewProduct}><Plus size={17} /> Add product</button>
+            </div>
+            {pageError && <div className="page-alert"><AlertCircle size={17} />{pageError}<button onClick={() => setPageError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
+            {productsLoading ? (
+              <div className="section-card section-loading"><span className="loading-dot" />Loading suppliers…</div>
+            ) : suppliers.length === 0 ? (
+              <section className="section-card section-empty">
+                <div className="empty-icon"><Truck size={21} /></div>
+                <h2>No suppliers yet</h2>
+                <p>Add supplier names when creating or editing products. They’ll appear here automatically.</p>
+                <button className="button button-primary" type="button" onClick={openNewProduct}><Plus size={16} /> Add a product</button>
+              </section>
+            ) : (
+              <section className="section-card">
+                <div className="section-card-heading"><div><h2>All suppliers <span className="table-count">{suppliers.length}</span></h2><p>Supplier summaries are based on your product records.</p></div></div>
+                <div className="supplier-list">
+                  {suppliers.map((supplier) => (
+                    <article className="supplier-row" key={supplier.name}>
+                      <div className="supplier-avatar"><Truck size={18} /></div>
+                      <div className="supplier-name"><strong>{supplier.name}</strong><span>{supplier.productCount} {supplier.productCount === 1 ? "product" : "products"}</span></div>
+                      <div className="supplier-metric"><span>Units</span><strong>{supplier.units.toLocaleString()}</strong></div>
+                      <div className="supplier-metric"><span>Stock value</span><strong>{money.format(supplier.inventoryValue)}</strong></div>
+                      <button className="toolbar-button supplier-view-button" type="button" onClick={() => { setSearch(supplier.name); setCategoryFilter("All categories"); navigateTo("inventory"); }}>View products</button>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+            <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><span>Supplier details come from your product catalog</span></footer>
+          </>}
+
+          {activeView === "settings" && <>
+            <div className="page-heading">
+              <div>
+                <div className="eyebrow muted-eyebrow">YOUR WORKSPACE</div>
+                <h1>Settings</h1>
+                <p>Manage your account details and inventory preferences.</p>
+              </div>
+            </div>
+            <div className="settings-grid">
+              <section className="section-card settings-card">
+                <div className="section-card-heading"><div><h2>Account</h2><p>Your signed-in account details.</p></div><span className="settings-icon"><ShieldCheck size={17} /></span></div>
+                <div className="settings-detail"><span>Email address</span><strong>{session.user.email}</strong></div>
+                <div className="settings-detail"><span>Workspace plan</span><strong>Free</strong></div>
+              </section>
+              <section className="section-card settings-card">
+                <div className="section-card-heading"><div><h2>Inventory alerts</h2><p>Choose when a product is considered low stock.</p></div><span className="settings-icon"><AlertCircle size={17} /></span></div>
+                <label className="field threshold-field">Low stock threshold (units)
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={minimumStockQuantity}
+                    onChange={(event) => {
+                      const nextThreshold = Number(event.target.value);
+                      if (!Number.isInteger(nextThreshold) || nextThreshold < 0) return;
+                      setMinimumStockQuantity(nextThreshold);
+                      window.localStorage.setItem(`b2g-stock-threshold:${session.user.id}`, String(nextThreshold));
+                    }}
+                  />
+                </label>
+                <p className="settings-help">Products below this quantity appear in your stock alerts. This preference is saved in this browser.</p>
+              </section>
+            </div>
+            <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><button className="settings-signout" type="button" onClick={() => void handleSignOut()}><LogOut size={14} /> Sign out</button></footer>
+          </>}
+
+          {activeView === "plans" && <>
+            <div className="page-heading">
+              <div>
+                <div className="eyebrow muted-eyebrow">SIMPLE PLAN OPTIONS</div>
+                <h1>Plans</h1>
+                <p>Pick the level that fits your inventory workflow.</p>
+              </div>
+            </div>
+            {planNotice && <div className="plan-notice" role="status">{planNotice}</div>}
+            <div className="plan-grid">
+              <article className="plan-card">
+                <span className="plan-label">START HERE</span><h2>Free</h2><p className="plan-price">$0 <span>/ forever</span></p>
+                <p className="plan-description">Manage your inventory and keep stock details in one place.</p>
+                <button className="button button-quiet plan-action" type="button" onClick={() => navigateTo("inventory")}>Current plan</button>
+              </article>
+              <article className="plan-card">
+                <span className="plan-label">SEE IT IN ACTION</span><h2>Demo</h2><p className="plan-price">Free <span>/ guided demo</span></p>
+                <p className="plan-description">Explore the workspace and see how inventory tracking works.</p>
+                <button className="button button-quiet plan-action" type="button" onClick={() => navigateTo("inventory")}>Explore the app</button>
+              </article>
+              <article className="plan-card plan-featured">
+                <span className="plan-label">FOR GROWING TEAMS</span><h2>Basic</h2><p className="plan-price">$50 <span>/ year</span></p>
+                <p className="plan-description">A straightforward annual option for your inventory workflow.</p>
+                <button className="button button-primary plan-action" type="button" onClick={() => setPlanNotice("Online billing is not set up yet. Your current Free plan remains active.")}>Choose Basic</button>
+              </article>
+              <article className="plan-card">
+                <span className="plan-label">FOR MORE CAPACITY</span><h2>Premium</h2><p className="plan-price">$345 <span>/ year</span></p>
+                <p className="plan-description">An expanded annual plan for businesses ready to grow.</p>
+                <button className="button button-primary plan-action" type="button" onClick={() => setPlanNotice("Online billing is not set up yet. Your current Free plan remains active.")}>Choose Premium</button>
+              </article>
+            </div>
+            <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><span>Paid plan checkout is not yet available.</span></footer>
+          </>}
         </div>
       </section>
 
@@ -499,8 +660,8 @@ function Brand() {
   return <div className="brand"><div className="brand-mark"><Boxes size={19} strokeWidth={2.2} /></div><span>B2G INVENTORY</span></div>;
 }
 
-function StockStatus({ quantity }: { quantity: number }) {
+function StockStatus({ quantity, minimum }: { quantity: number; minimum: number }) {
   if (quantity === 0) return <span className="status-pill status-out"><span />Out of stock</span>;
-  if (quantity < MIN_STOCK_QUANTITY) return <span className="status-pill status-low"><span />Low stock</span>;
+  if (quantity < minimum) return <span className="status-pill status-low"><span />Low stock</span>;
   return <span className="status-pill status-in"><span />In stock</span>;
 }

@@ -12,7 +12,13 @@ A stock inventory dashboard built with Next.js, TypeScript, and Supabase. Users 
 
 The app supports email/password sign-in and account creation. To allow signup without email confirmation, open your Supabase project and go to **Authentication → Sign In / Providers → Email**. Turn off **Confirm email** and save. This is a Supabase project setting and cannot be changed using the app's publishable key. New signups will then be able to sign in without confirming an email.
 
-Products with fewer than 5 units in stock appear in the dashboard's stock alerts. Products with zero units are also included.
+By default, products with fewer than 5 units in stock appear in the dashboard's stock alerts. Products with zero units are also included. The threshold can be changed in Settings.
+
+## Dashboard features
+
+- The **Suppliers** section summarizes supplier names entered on products; it does not require a separate suppliers table.
+- **Settings** lets each signed-in browser change its low-stock threshold. The preference is saved locally per account and is not synced between devices.
+- **Plans** lists Free, Demo, Basic ($50 USD/year), and Premium ($345 USD/year). Paid-plan checkout is not configured; selecting a paid plan does not charge or change the account.
 
 ## Deploy to Vercel
 
