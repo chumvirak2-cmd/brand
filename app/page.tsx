@@ -140,9 +140,11 @@ export default function Home() {
       }
       await loadAll();
       setImportMessage(`Imported workbook. ${summary.join(" · ") || "No data rows found."}`);
-    } catch (err) {
-      setPageError(err instanceof Error ? err.message : "Workbook import failed.");
-    } finally { setImporting(false); }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Workbook import failed.";
+        const detail = err && typeof err === "object" && "details" in err ? ` ${String((err as { details?: unknown }).details ?? "")}` : "";
+        setPageError(msg + detail);
+      } finally { setImporting(false); }
   }
 
   const q = search.trim().toLowerCase();

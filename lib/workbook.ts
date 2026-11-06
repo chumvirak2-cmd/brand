@@ -87,14 +87,42 @@ export const num = (v: unknown, fallback = 0) => {
   return fallback;
 };
 export const txt = (v: unknown) => (v == null ? "" : String(v).trim());
+function excelSerialToIso(serial: number): string | null {
+  if (!Number.isFinite(serial) || serial < 1 || serial > 2958465) return null;
+  const whole = Math.floor(serial);
+  if (whole < 1) return null;
+  const utc = Date.UTC(1899, 11, 30) + whole * 86400000;
+  const d = new Date(utc);
+  if (Number.isNaN(d.getTime())) return null;
+  const y = d.getUTCFullYear();
+  if (y < 1900 || y > 2200) return null;
+  return `${y}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
 export const isoDate = (v: unknown): string | null => {
-  if (v instanceof Date && !Number.isNaN(v.getTime())) return v.toISOString().slice(0, 10);
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    const y = v.getUTCFullYear();
+    if (y < 1900 || y > 2200) return null;
+    return v.toISOString().slice(0, 10);
+  }
+  if (typeof v === "number") return excelSerialToIso(v);
   const s = txt(v);
-  if (!s || s === "1900-01-00" || s.startsWith("#")) return null;
-  const d = new Date(s);
-  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  if (!s || /^#|1900-01-00/i.test(s)) return null;
+  const n = Number(s.replace(/[$,\s]/g, ""));
+  if (Number.isFinite(n) && /^[\d$,\s.]+$/.test(s) && n > 25569 && n < 2958465) {
+    const ex = excelSerialToIso(n);
+    if (ex) return ex;
+  }
   const m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-  if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  if (m) {
+    const y = Number(m[1]);
+    if (y >= 1900 && y <= 2200) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+    return null;
+  }
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    const y = d.getUTCFullYear();
+    if (y >= 1900 && y <= 2200) return d.toISOString().slice(0, 10);
+  }
   return null;
 };
 export function toJson(v: unknown): Json {
