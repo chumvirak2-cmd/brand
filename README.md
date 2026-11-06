@@ -1,31 +1,30 @@
 # B2G INVENTORY
 
-A stock inventory dashboard built with Next.js, TypeScript, and Supabase. Users sign in with email and password; each account can manage only its own products. The app is ready to deploy to Vercel.
+A B2G Engineering stock inventory workbook app built with Next.js, TypeScript, and Supabase. It follows the `B2G_Engineering_Stock_Inventory_Upgraded (TEST).xlsx` structure: Dashboard, Materials Register, Assets & Tools, Requests, Material/Asset Movements, Project Sites, Check Schedule, and Verification Matrix. Users sign in with email and password; each account can manage only its own records.
 
 ## Run locally
 
 1. Install Node.js 20.9 or later.
 2. Install dependencies with `npm install`.
-3. Copy `.env.example` to `.env.local` and add the project URL and publishable key from your Supabase project's API settings.
-4. In the Supabase SQL Editor, run [`supabase/migrations/20261030000000_create_products.sql`](./supabase/migrations/20261030000000_create_products.sql).
+3. Copy `.env.example` to `.env.local` and add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+4. In the Supabase SQL Editor, run migrations in order:
+   - [`supabase/migrations/20261030000000_create_products.sql`](./supabase/migrations/20261030000000_create_products.sql)
+   - [`supabase/migrations/20261104000000_add_product_extra_data.sql`](./supabase/migrations/20261104000000_add_product_extra_data.sql)
+   - [`supabase/migrations/20261106000000_b2g_workbook_schema.sql`](./supabase/migrations/20261106000000_b2g_workbook_schema.sql)
 5. Start the development server with `npm run dev`.
 
-The app supports email/password sign-in and account creation. To allow signup without email confirmation, open your Supabase project and go to **Authentication → Sign In / Providers → Email**. Turn off **Confirm email** and save. This is a Supabase project setting and cannot be changed using the app's publishable key. New signups will then be able to sign in without confirming an email.
+## Workbook behavior
 
-By default, products with fewer than 5 units in stock appear in the dashboard's stock alerts. Products with zero units are also included. The threshold can be changed in Settings.
-
-## Dashboard features
-
-- The **Suppliers** section summarizes supplier names entered on products; it does not require a separate suppliers table.
-- **Settings** lets each signed-in browser change its low-stock threshold. The preference is saved locally per account and is not synced between devices.
-- **Plans** lists Free, Demo, Basic ($50 USD/year), and Premium ($345 USD/year). Paid-plan checkout is not configured; selecting a paid plan does not charge or change the account.
+- **Upload Excel** imports a B2G workbook (`.xlsx`) by sheet name and headers into the matching Supabase tables for the signed-in user. Existing workbook rows for that user are replaced during import so the app reflects the uploaded workbook.
+- **Dashboard** summarizes materials, inventory value, low/out stock, assets, requests, overdue returns, and inventory checking/verification metrics from the loaded registers.
+- **Registers/matrices** display workbook-aligned columns. Unrecognized columns from uploaded sheets are preserved in `extra_data`.
+- Material/asset status, balances, and exceptions are derived in the app from available records; keep master registers and movement ledgers accurate for the best dashboard results.
 
 ## Deploy to Vercel
 
-1. Push this project to a Git provider and import it into Vercel, or run `npx vercel` from the project root.
-2. In Vercel's project settings, set **Framework Preset** to **Next.js**, **Root Directory** to the project root, and **Output Directory** to blank/default. Do not set it to `public`; Vercel should use the Next.js build output automatically.
-3. Add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` to the Vercel project's environment variables for the deployments you want to use. Copy the values from your local `.env.local`; do not commit `.env.local`.
-4. Deploy. Vercel detects and builds the Next.js app automatically.
-5. In Supabase Auth URL Configuration, set the site URL to your production Vercel domain and add your Vercel preview URLs to the allowed redirect URLs if you use previews.
+1. Import the project into Vercel or run `npx vercel`.
+2. Use **Framework Preset: Next.js** and keep **Root Directory** at the project root.
+3. Add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+4. Configure Supabase Auth site/redirect URLs for your Vercel domain.
 
-Only the Supabase publishable key belongs in the browser. Never expose a Supabase secret or service-role key as a `NEXT_PUBLIC_` variable.
+Only the Supabase publishable key belongs in the browser. Never expose a secret/service-role key as `NEXT_PUBLIC_`.

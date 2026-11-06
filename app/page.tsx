@@ -2,76 +2,39 @@
 
 import {
   AlertCircle,
-  ArrowDown,
-  ArrowUp,
   ArrowUpDown,
-  Bell,
   Boxes,
+  CalendarClock,
   Check,
-  ChevronDown,
-  CircleHelp,
+  ClipboardCheck,
+  FileSpreadsheet,
   LayoutDashboard,
   LogOut,
   Menu,
   Package,
-  Plus,
   Search,
-  Settings,
   ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
   Truck,
+  Upload,
+  Wrench,
   X,
 } from "lucide-react";
-import type { FormEvent } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ChangeEvent, FormEvent, ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase";
+import type { Json } from "@/lib/database.types";
+import {
+  type Asset, type AssetMovement, type CheckSchedule, type Material, type MaterialMovement,
+  type ProjectSite, type RequestRow, type SheetKey, type VerificationLine,
+  SHEETS, dateFmt, detectDataStart, findHeader, isoDate, money, num, pillClass, sheetKind, toJson, txt,
+} from "@/lib/workbook";
 
-type Product = {
-  id: string;
-  name: string;
-  sku: string;
-  category: string;
-  quantity: number;
-  unit_price: number;
-  supplier: string;
+type DataState = {
+  materials: Material[]; assets: Asset[]; requests: RequestRow[]; materialMovements: MaterialMovement[];
+  assetMovements: AssetMovement[]; projectSites: ProjectSite[]; checkSchedule: CheckSchedule[]; verification: VerificationLine[];
 };
-
-type ProductDraft = Omit<Product, "id">;
-type DashboardView = "inventory" | "suppliers" | "settings" | "plans";
-
-type SupplierSummary = {
-  name: string;
-  productCount: number;
-  units: number;
-  inventoryValue: number;
-};
-
-const EMPTY_DRAFT: ProductDraft = {
-  name: "",
-  sku: "",
-  category: "",
-  quantity: 0,
-  unit_price: 0,
-  supplier: "",
-};
-
-const MIN_STOCK_QUANTITY = 5;
-
-function getSavedStockThreshold(userId: string): number {
-  const savedThreshold = window.localStorage.getItem(`b2g-stock-threshold:${userId}`);
-  const parsedThreshold = Number(savedThreshold);
-  return savedThreshold && Number.isInteger(parsedThreshold) && parsedThreshold >= 0
-    ? parsedThreshold
-    : MIN_STOCK_QUANTITY;
-}
-
-const money = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  maximumFractionDigits: 2,
-});
+const emptyData: DataState = { materials: [], assets: [], requests: [], materialMovements: [], assetMovements: [], projectSites: [], checkSchedule: [], verification: [] };
 
 export default function Home() {
   const configured = isSupabaseConfigured();
@@ -84,584 +47,408 @@ export default function Home() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [products, setProducts] = useState<Product[]>([]);
-  const [productsLoading, setProductsLoading] = useState(true);
+  const [data, setData] = useState<DataState>(emptyData);
+  const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState("");
+  const [view, setView] = useState<SheetKey>("dashboard");
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("All categories");
-  const [sortAscending, setSortAscending] = useState(true);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
-  const [draft, setDraft] = useState<ProductDraft>(EMPTY_DRAFT);
-  const [savingProduct, setSavingProduct] = useState(false);
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [activeView, setActiveView] = useState<DashboardView>("inventory");
-  const [minimumStockQuantity, setMinimumStockQuantity] = useState(MIN_STOCK_QUANTITY);
-  const [planNotice, setPlanNotice] = useState("");
+  const [mobileNav, setMobileNav] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
-  const loadProducts = useCallback(async () => {
+  const loadAll = useCallback(async () => {
     if (!supabase) return;
-    const { data, error } = await supabase
-      .from("products")
-      .select("id, name, sku, category, quantity, unit_price, supplier")
-      .order("name");
-
-    setProductsLoading(false);
-    if (error) {
-      setPageError(error.message);
-      setProducts([]);
-    } else {
-      setProducts(data ?? []);
-    }
+    setLoading(true);
+    setPageError("");
+    const [m, a, r, mm, am, p, c, v] = await Promise.all([
+      supabase.from("materials").select("*").order("sku"),
+      supabase.from("assets").select("*").order("asset_id"),
+      supabase.from("requests").select("*").order("request_date", { ascending: false }),
+      supabase.from("material_movements").select("*").order("transaction_date", { ascending: false }),
+      supabase.from("asset_movements").select("*").order("movement_date", { ascending: false }),
+      supabase.from("project_sites").select("*").order("project_id"),
+      supabase.from("check_schedule").select("*").order("planned_date", { ascending: false }),
+      supabase.from("verification_matrix").select("*").order("check_date", { ascending: false }),
+    ]);
+    const err = [m, a, r, mm, am, p, c, v].find((x) => x.error)?.error;
+    if (err) setPageError(`${err.message}. Run the latest Supabase migration for workbook tables.`);
+    setData({
+      materials: (m.data ?? []) as unknown as Material[], assets: (a.data ?? []) as unknown as Asset[],
+      requests: (r.data ?? []) as unknown as RequestRow[], materialMovements: (mm.data ?? []) as unknown as MaterialMovement[],
+      assetMovements: (am.data ?? []) as unknown as AssetMovement[], projectSites: (p.data ?? []) as unknown as ProjectSite[],
+      checkSchedule: (c.data ?? []) as unknown as CheckSchedule[], verification: (v.data ?? []) as unknown as VerificationLine[],
+    });
+    setLoading(false);
   }, [supabase]);
 
   useEffect(() => {
     if (!supabase) return;
-
-    supabase.auth.getSession().then(({ data, error }) => {
+    supabase.auth.getSession().then(({ data: d, error }) => {
       if (error) setAuthError(error.message);
-      setSession(data.session);
-      if (data.session) {
-        setMinimumStockQuantity(getSavedStockThreshold(data.session.user.id));
-      }
-      if (data.session) void loadProducts();
+      setSession(d.session);
+      if (d.session) void loadAll(); else setLoading(false);
       setAuthLoading(false);
     });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-      if (nextSession) {
-        setMinimumStockQuantity(getSavedStockThreshold(nextSession.user.id));
-      }
-      setAuthError("");
-      setAuthMessage("");
-      if (!nextSession) setProducts([]);
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+      setSession(s); setAuthError(""); setAuthMessage("");
+      if (s) void loadAll(); else { setData(emptyData); setLoading(false); }
     });
+    return () => sub.subscription.unsubscribe();
+  }, [supabase, loadAll]);
 
-    return () => subscription.unsubscribe();
-  }, [supabase, loadProducts]);
-
-  async function handleAuth(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAuthError("");
-    setAuthMessage("");
-    if (!supabase) {
-      setAuthError("Add your Supabase URL and publishable key to .env.local to enable login.");
-      return;
-    }
-    setAuthSubmitting(true);
-    const result =
-      authMode === "signin"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
-
-    if (result.error) {
-      setAuthError(result.error.message);
-    } else if (authMode === "signup" && !result.data.session) {
-      setAuthMessage("Check your inbox to confirm your email, then sign in.");
-    }
-    if (result.data.session) {
-      setProductsLoading(true);
-      void loadProducts();
-    }
+  async function handleAuth(e: FormEvent) {
+    e.preventDefault(); if (!supabase) return;
+    setAuthSubmitting(true); setAuthError(""); setAuthMessage("");
+    const r = authMode === "signin"
+      ? await supabase.auth.signInWithPassword({ email, password })
+      : await supabase.auth.signUp({ email, password });
+    if (r.error) setAuthError(r.error.message);
+    else if (authMode === "signup" && !r.data.session) setAuthMessage("Check your inbox to confirm your email, then sign in.");
     setAuthSubmitting(false);
   }
+  async function signOut() { if (supabase) await supabase.auth.signOut(); }
 
-  async function handleSignOut() {
-    if (!supabase) return;
-    const { error } = await supabase.auth.signOut();
-    if (error) setPageError(error.message);
-    else setProducts([]);
+  async function importWorkbook(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (!file || !supabase || !session) return;
+    setImporting(true); setPageError(""); setImportMessage("");
+    try {
+      if (!file.name.toLowerCase().endsWith(".xlsx")) throw new Error("Choose an .xlsx Excel workbook.");
+      const readXlsxFile = (await import("read-excel-file/browser")).default;
+      const sheets = (await readXlsxFile(file)) as Array<{ sheet: string; data: unknown[][] }>;
+      const mapped = sheets.map((s) => ({ name: s.sheet, data: s.data, kind: sheetKind(s.sheet) })).filter((s): s is { name: string; data: unknown[][]; kind: SheetKey } => !!s.kind);
+      if (!mapped.length) throw new Error("No workbook sheets were recognized. Expected B2G sheet names like Materials Register, Assets & Tools, Requests, etc.");
+      const summary: string[] = [];
+      for (const sheet of mapped) {
+        const rows = sheet.data ?? [];
+        const headerIdx = detectDataStart(rows);
+        const headers = (rows[headerIdx] ?? []).map((c, i) => txt(c) || `Column ${i + 1}`);
+        const body = rows.slice(headerIdx + 1);
+        const parsed = parseSheet(sheet.kind, headers, body);
+        if (!parsed.table) continue;
+        const table = parsed.table as "materials" | "assets" | "requests" | "material_movements" | "asset_movements" | "project_sites" | "check_schedule" | "verification_matrix";
+        const del = await supabase.from(table).delete().eq("user_id", session.user.id);
+        if (del.error) throw new Error(`${sheet.name}: ${del.error.message}`);
+        let count = 0;
+        for (let i = 0; i < parsed.rows.length; i += 200) {
+          const batch = parsed.rows.slice(i, i + 200);
+          const ins = await supabase.from(table).insert(batch as never[]);
+          if (ins.error) throw new Error(`${sheet.name}: ${ins.error.message}`);
+          count += batch.length;
+        }
+        summary.push(`${sheet.name}: ${count}`);
+      }
+      await loadAll();
+      setImportMessage(`Imported workbook. ${summary.join(" · ") || "No data rows found."}`);
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : "Workbook import failed.");
+    } finally { setImporting(false); }
   }
 
-  function openNewProduct() {
-    setEditingProduct(null);
-    setDraft(EMPTY_DRAFT);
-    setPageError("");
-    setModalOpen(true);
-  }
+  const q = search.trim().toLowerCase();
+  const filtered = useMemo(() => ({
+    materials: data.materials.filter((r) => !q || [r.sku, r.item_description, r.category, r.location, r.preferred_supplier].join(" ").toLowerCase().includes(q)),
+    assets: data.assets.filter((r) => !q || [r.asset_id, r.asset_name, r.category, r.serial_no, r.current_location, r.assigned_to, r.status].join(" ").toLowerCase().includes(q)),
+    requests: data.requests.filter((r) => !q || [r.request_id, r.item_asset_id, r.description, r.project_id, r.requester, r.approval_status].join(" ").toLowerCase().includes(q)),
+    materialMovements: data.materialMovements.filter((r) => !q || [r.movement_id, r.sku, r.item_description, r.movement_type, r.from_location, r.to_location, r.project_id].join(" ").toLowerCase().includes(q)),
+    assetMovements: data.assetMovements.filter((r) => !q || [r.movement_id, r.asset_id, r.asset_name, r.action, r.from_location, r.to_location, r.assigned_to].join(" ").toLowerCase().includes(q)),
+    projectSites: data.projectSites.filter((r) => !q || [r.project_id, r.project_name, r.client, r.site_location, r.status].join(" ").toLowerCase().includes(q)),
+    checkSchedule: data.checkSchedule.filter((r) => !q || [r.check_id, r.location, r.frequency, r.check_status, r.verification_outcome].join(" ").toLowerCase().includes(q)),
+    verification: data.verification.filter((r) => !q || [r.check_line_id, r.check_id, r.item_asset_id, r.description, r.location, r.verification_result].join(" ").toLowerCase().includes(q)),
+  }), [data, q]);
 
-  function openEditProduct(product: Product) {
-    setEditingProduct(product);
-    setDraft({
-      name: product.name,
-      sku: product.sku,
-      category: product.category,
-      quantity: product.quantity,
-      unit_price: product.unit_price,
-      supplier: product.supplier,
-    });
-    setPageError("");
-    setModalOpen(true);
-  }
+  if (authLoading) return <main className="loading-screen"><div className="brand-mark"><Boxes size={23} /></div><span>Loading workspace</span></main>;
+  if (!session) return <AuthView {...{ configured, authMode, setAuthMode, email, setEmail, password, setPassword, authError, authMessage, authSubmitting, handleAuth }} />;
 
-  async function saveProduct(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!supabase) return;
-    setSavingProduct(true);
-    setPageError("");
-    const result = editingProduct
-      ? await supabase
-          .from("products")
-          .update(draft)
-          .eq("id", editingProduct.id)
-          .select("id, name, sku, category, quantity, unit_price, supplier")
-          .single()
-      : await supabase
-          .from("products")
-          .insert(draft)
-          .select("id, name, sku, category, quantity, unit_price, supplier")
-          .single();
-
-    if (result.error) {
-      setPageError(result.error.message);
-      setSavingProduct(false);
-      return;
-    }
-    setProducts((current) =>
-      editingProduct
-        ? current.map((product) =>
-          product.id === editingProduct.id ? result.data : product,
-          )
-        : [...current, result.data].sort((a, b) =>
-            a.name.localeCompare(b.name),
-          ),
-    );
-    setModalOpen(false);
-    setSavingProduct(false);
-  }
-
-  async function deleteProduct(product: Product) {
-    if (!supabase || !window.confirm(`Delete "${product.name}" from inventory?`)) {
-      return;
-    }
-    setPageError("");
-    const { error } = await supabase.from("products").delete().eq("id", product.id);
-    if (error) {
-      setPageError(error.message);
-      return;
-    }
-    setProducts((current) => current.filter((item) => item.id !== product.id));
-    setModalOpen(false);
-  }
-
-  const categories = useMemo(
-    () => ["All categories", ...Array.from(new Set(products.map((p) => p.category))).sort()],
-    [products],
-  );
-  const filteredProducts = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return products
-      .filter((product) => {
-        const matchesSearch =
-          !query ||
-          [product.name, product.sku, product.category, product.supplier]
-            .join(" ")
-            .toLowerCase()
-            .includes(query);
-        const matchesCategory =
-          categoryFilter === "All categories" || product.category === categoryFilter;
-        return matchesSearch && matchesCategory;
-      })
-      .sort((a, b) =>
-        sortAscending
-          ? a.name.localeCompare(b.name)
-          : b.name.localeCompare(a.name),
-      );
-  }, [categoryFilter, products, search, sortAscending]);
-
-  const totalUnits = products.reduce((sum, product) => sum + product.quantity, 0);
-  const inventoryValue = products.reduce(
-    (sum, product) => sum + product.quantity * Number(product.unit_price),
-    0,
-  );
-  const stockAlerts = products.filter(
-    (product) => product.quantity === 0 || product.quantity < minimumStockQuantity,
-  );
-  const lowStock = stockAlerts.filter((product) => product.quantity > 0).length;
-  const outOfStock = products.filter((product) => product.quantity === 0).length;
-  const suppliers = useMemo(() => {
-    const summaries = new Map<string, SupplierSummary>();
-    products.forEach((product) => {
-      const name = product.supplier.trim();
-      if (!name) return;
-      const current = summaries.get(name) ?? {
-        name,
-        productCount: 0,
-        units: 0,
-        inventoryValue: 0,
-      };
-      current.productCount += 1;
-      current.units += product.quantity;
-      current.inventoryValue += product.quantity * Number(product.unit_price);
-      summaries.set(name, current);
-    });
-    return Array.from(summaries.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [products]);
-
-  function navigateTo(view: DashboardView) {
-    setActiveView(view);
-    setMobileNavOpen(false);
-    setPlanNotice("");
-  }
-
-  if (authLoading) {
-    return (
-      <main className="loading-screen">
-        <div className="brand-mark"><Boxes size={23} /></div>
-        <span>Loading your workspace</span>
-      </main>
-    );
-  }
-
-  if (!session) {
-    return (
-      <main className="auth-page">
-        <div className="auth-side">
-          <div className="auth-brand"><Brand /></div>
-          <div className="auth-copy">
-            <div className="eyebrow"><Sparkles size={14} /> INVENTORY, IN FOCUS</div>
-            <h1>Know what you have.<br /><span>Stay ready for what’s next.</span></h1>
-            <p>A calmer way to keep your stock accurate, your team aligned, and your business moving.</p>
-            <div className="auth-feature">
-              <span className="feature-icon"><ShieldCheck size={18} /></span>
-              <span><strong>Your inventory stays yours</strong><small>Private workspace, protected by Supabase.</small></span>
-            </div>
-          </div>
-          <div className="auth-footer">B2G INVENTORY <span>·</span> BUILT FOR THE EVERYDAY</div>
-        </div>
-        <section className="auth-panel">
-          <div className="mobile-brand"><Brand /></div>
-          <div className="auth-card">
-            <div className="auth-heading">
-              <div className="auth-glyph"><Package size={22} /></div>
-              <div className="eyebrow muted-eyebrow">WELCOME TO B2G INVENTORY</div>
-              <h2>{authMode === "signin" ? "Sign in to your account" : "Create your account"}</h2>
-              <p>{authMode === "signin" ? "Enter your details to pick up where you left off." : "Get your inventory workspace set up in a minute."}</p>
-            </div>
-            <form className="auth-form" onSubmit={handleAuth}>
-              <label htmlFor="email">Email address</label>
-              <input id="email" type="email" autoComplete="email" placeholder="you@company.com" value={email} onChange={(event) => setEmail(event.target.value)} required />
-              <div className="label-row"><label htmlFor="password">Password</label>{authMode === "signin" && <span className="password-hint">At least 6 characters</span>}</div>
-              <input id="password" type="password" autoComplete={authMode === "signin" ? "current-password" : "new-password"} placeholder="Enter your password" minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} required />
-              {authError && <div className="form-alert error-alert"><AlertCircle size={16} />{authError}</div>}
-              {authMessage && <div className="form-alert success-alert"><Check size={16} />{authMessage}</div>}
-              {!configured && <div className="setup-note">Supabase isn’t connected yet. Add the two environment variables from <code>.env.example</code> to <code>.env.local</code>.</div>}
-              <button className="button button-primary auth-submit" type="submit" disabled={authSubmitting}>
-                {authSubmitting ? "Please wait…" : authMode === "signin" ? "Sign in" : "Create account"}
-                {!authSubmitting && <ArrowUp size={16} className="button-arrow" />}
-              </button>
-            </form>
-            <div className="auth-switch">
-              {authMode === "signin" ? "New to B2G INVENTORY?" : "Already have an account?"}
-              <button type="button" onClick={() => { setAuthMode(authMode === "signin" ? "signup" : "signin"); setAuthError(""); setAuthMessage(""); }}>
-                {authMode === "signin" ? "Create an account" : "Sign in"}
-              </button>
-            </div>
-            <div className="privacy-note"><ShieldCheck size={14} /> Secure sign-in powered by Supabase</div>
-          </div>
-          <div className="auth-panel-footer">© 2026 B2G INVENTORY</div>
-        </section>
-      </main>
-    );
-  }
-
-  const firstName = session.user.email?.split("@")[0] ?? "there";
+  const name = session.user.email?.split("@")[0] ?? "user";
+  const counts: Record<SheetKey, number> = { dashboard: 0, materials: data.materials.length, assets: data.assets.length, requests: data.requests.length, materialMovements: data.materialMovements.length, assetMovements: data.assetMovements.length, projectSites: data.projectSites.length, checkSchedule: data.checkSchedule.length, verification: data.verification.length };
 
   return (
     <main className="app-shell">
-      {mobileNavOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
-      <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`}>
+      {mobileNav && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMobileNav(false)} />}
+      <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
         <Brand />
-        <div className="workspace-switcher">
-          <div className="workspace-avatar">S</div>
-          <div className="workspace-info"><strong>My workspace</strong><span>Free plan</span></div>
-          <ChevronDown size={16} />
-        </div>
-        <div className="nav-label">WORKSPACE</div>
-        <nav className="main-nav" aria-label="Main navigation">
-          <button className="nav-item" type="button" onClick={() => navigateTo("inventory")}><LayoutDashboard size={18} /> Overview</button>
-          <button className={`nav-item ${activeView === "inventory" ? "active" : ""}`} type="button" onClick={() => navigateTo("inventory")}><Package size={18} /> Inventory <span className="nav-count">{products.length}</span></button>
-          <button className={`nav-item ${activeView === "suppliers" ? "active" : ""}`} type="button" onClick={() => navigateTo("suppliers")}><Truck size={18} /> Suppliers</button>
+        <div className="nav-label">B2G WORKBOOK</div>
+        <nav className="main-nav" aria-label="Workbook sheets">
+          {SHEETS.map((s) => (
+            <button key={s.key} type="button" className={`nav-item ${view === s.key ? "active" : ""}`} onClick={() => { setView(s.key); setMobileNav(false); }}>
+              <NavIcon k={s.key} /> {s.label} {s.key !== "dashboard" && <span className="nav-count">{counts[s.key]}</span>}
+            </button>
+          ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="upgrade-card">
-            <div className="upgrade-icon"><Sparkles size={15} /></div>
-            <strong>Make more room to grow</strong>
-            <p>Keep everything organized as your business scales.</p>
-            <button type="button" onClick={() => navigateTo("plans")}>Explore plans <ArrowUp size={14} /></button>
-          </div>
-          <button className={`nav-item ${activeView === "settings" ? "active" : ""}`} type="button" onClick={() => navigateTo("settings")}><Settings size={18} /> Settings</button>
-          <span className="nav-item"><CircleHelp size={18} /> Help & support</span>
-          <div className="profile-row">
-            <div className="profile-avatar">{firstName.charAt(0).toUpperCase()}</div>
-            <div className="profile-info"><strong>{firstName}</strong><span>{session.user.email}</span></div>
-            <button className="icon-button signout-button" type="button" onClick={handleSignOut} aria-label="Sign out"><LogOut size={17} /></button>
-          </div>
+          <div className="profile-row"><div className="profile-avatar">{name[0]?.toUpperCase()}</div><div className="profile-info"><strong>{name}</strong><span>{session.user.email}</span></div><button className="icon-button signout-button" onClick={signOut} aria-label="Sign out"><LogOut size={17} /></button></div>
         </div>
       </aside>
-
-      <section className="main-content" id="overview">
+      <section className="main-content">
         <header className="topbar">
-          <button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}><Menu size={20} /></button>
-          <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{activeView[0].toUpperCase() + activeView.slice(1)}</strong></div>
+          <button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Menu size={20} /></button>
+          <div className="breadcrumbs"><span>B2G Engineering</span><span className="breadcrumb-slash">/</span><strong>{SHEETS.find((s) => s.key === view)?.label}</strong></div>
           <div className="topbar-right">
-            <span className="today-label">{new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(new Date())}</span>
-            <div className="notification-wrap">
-              <button
-                className={`icon-button notification-button ${notificationsOpen ? "notification-active" : ""}`}
-                type="button"
-                aria-label={`Stock alerts: ${stockAlerts.length}`}
-                aria-expanded={notificationsOpen}
-                onClick={() => setNotificationsOpen((open) => !open)}
-              >
-                <Bell size={17} />
-                {stockAlerts.length > 0 && <span className="notification-count">{stockAlerts.length > 99 ? "99+" : stockAlerts.length}</span>}
-              </button>
-              {notificationsOpen && (
-                <section className="notification-panel" aria-label="Stock notifications">
-                  <div className="notification-heading">
-                    <div><strong>Stock alerts</strong><span>Minimum stock: {minimumStockQuantity} units</span></div>
-                    <button className="icon-button" type="button" onClick={() => setNotificationsOpen(false)} aria-label="Close stock alerts"><X size={16} /></button>
-                  </div>
-                  {stockAlerts.length === 0 ? (
-                    <div className="notification-empty"><ShieldCheck size={19} /><span>All clear</span><small>No products are below the minimum.</small></div>
-                  ) : (
-                    <div className="notification-list">
-                      {stockAlerts.map((product) => (
-                        <button
-                          className="notification-item"
-                          type="button"
-                          key={product.id}
-                          onClick={() => { setNotificationsOpen(false); openEditProduct(product); }}
-                        >
-                          <span className={`notification-product-icon ${product.quantity === 0 ? "notification-out" : ""}`}><AlertCircle size={16} /></span>
-                          <span className="notification-product-copy"><strong>{product.name}</strong><small>{product.sku}</small></span>
-                          <span className="notification-quantity">{product.quantity === 0 ? "Out" : `${product.quantity} left`}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-            </div>
-            <div className="topbar-avatar">{firstName.charAt(0).toUpperCase()}</div>
+            <input ref={fileRef} className="visually-hidden" type="file" accept=".xlsx" onChange={(e) => void importWorkbook(e)} />
+            <button className="toolbar-button upload-button" type="button" onClick={() => fileRef.current?.click()} disabled={importing || loading}>
+              {importing ? <FileSpreadsheet size={15} /> : <Upload size={15} />} <span>{importing ? "Importing…" : "Upload Workbook"}</span>
+            </button>
+            <button className="icon-button" type="button" onClick={() => void loadAll()} aria-label="Refresh"><ArrowUpDown size={17} /></button>
           </div>
         </header>
-
-        <div className="page-content" id={activeView}>
-          {activeView === "inventory" && <>
-          <div className="page-heading">
-            <div>
-              <div className="eyebrow muted-eyebrow">YOUR STOCK, AT A GLANCE</div>
-              <h1>Inventory</h1>
-              <p>Keep track of what’s in stock and what needs your attention.</p>
-            </div>
-            <button className="button button-primary add-button" onClick={openNewProduct}><Plus size={17} /> Add product</button>
-          </div>
-
-          {pageError && <div className="page-alert"><AlertCircle size={17} />{pageError}<button onClick={() => setPageError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
-
-          <div className="stats-grid">
-            <article className="stat-card">
-              <div className="stat-top"><span className="stat-icon inventory-icon"><Package size={17} /></span><span className="stat-trend neutral"><Boxes size={13} /> Items</span></div>
-              <div className="stat-value">{products.length}</div><div className="stat-label">Total products</div>
-              <div className="stat-foot"><span className="stat-dot blue-dot" /> Across your catalog</div>
-            </article>
-            <article className="stat-card">
-              <div className="stat-top"><span className="stat-icon units-icon"><Boxes size={17} /></span><span className="stat-trend neutral">Units</span></div>
-              <div className="stat-value">{totalUnits.toLocaleString()}</div><div className="stat-label">Units in stock</div>
-              <div className="stat-foot"><span className="stat-dot green-dot" /> Ready to move</div>
-            </article>
-            <article className="stat-card">
-              <div className="stat-top"><span className="stat-icon value-icon"><span className="currency-symbol">$</span></span><span className="stat-trend neutral">At cost</span></div>
-              <div className="stat-value">{money.format(inventoryValue)}</div><div className="stat-label">Inventory value</div>
-              <div className="stat-foot"><span className="stat-dot purple-dot" /> Current stock value</div>
-            </article>
-            <article className="stat-card">
-              <div className="stat-top"><span className="stat-icon alert-icon"><AlertCircle size={17} /></span><span className={`stat-trend ${stockAlerts.length > 0 ? "warning" : "good"}`}>{stockAlerts.length > 0 ? "Needs attention" : "All clear"}</span></div>
-              <div className="stat-value">{stockAlerts.length}</div><div className="stat-label">Low stock alerts</div>
-              <div className="stat-foot"><span className={`stat-dot ${stockAlerts.length > 0 ? "orange-dot" : "green-dot"}`} /> {outOfStock} out of stock · {lowStock} below {minimumStockQuantity} units</div>
-            </article>
-          </div>
-
-          <section className="inventory-card">
-            <div className="inventory-card-heading">
-              <div><h2>All products <span className="table-count">{products.length}</span></h2><p>A complete list of everything you’re keeping on hand.</p></div>
-              <button className="icon-button filter-button" aria-label="Filter products" onClick={() => setCategoryFilter(categoryFilter === "All categories" ? categories[1] ?? "All categories" : "All categories")}><SlidersHorizontal size={17} /></button>
-            </div>
-            <div className="table-toolbar">
-              <label className="search-field"><Search size={16} /><input type="search" placeholder="Search products..." value={search} onChange={(event) => setSearch(event.target.value)} /></label>
-              <label className="category-select"><select aria-label="Filter by category" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>{categories.map((category) => <option key={category}>{category}</option>)}</select><ChevronDown size={15} /></label>
-              <button className="toolbar-button" onClick={() => { setPageError(""); setProductsLoading(true); void loadProducts(); }} title="Refresh inventory"><ArrowUpDown size={15} /><span>Refresh</span></button>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead><tr>
-                  <th><button className="sort-button" onClick={() => setSortAscending((current) => !current)}>PRODUCT <ArrowDown size={13} className={sortAscending ? "sort-active" : ""} /></button></th>
-                  <th>SKU</th><th>CATEGORY</th><th>SUPPLIER</th><th className="align-right">UNIT PRICE</th><th className="align-right">IN STOCK</th><th>STATUS</th><th aria-label="Actions" />
-                </tr></thead>
-                <tbody>
-                  {productsLoading ? (
-                    <tr><td colSpan={8}><div className="table-message"><span className="loading-dot" />Loading your inventory…</div></td></tr>
-                  ) : filteredProducts.length === 0 ? (
-                    <tr><td colSpan={8}><div className="empty-state"><div className="empty-icon"><Package size={21} /></div><strong>{products.length === 0 ? "Your inventory starts here" : "No products found"}</strong><span>{products.length === 0 ? "Add your first product and keep everything in one place." : "Try another search or category."}</span>{products.length === 0 && <button className="button button-primary" onClick={openNewProduct}><Plus size={16} /> Add your first product</button>}</div></td></tr>
-                  ) : filteredProducts.map((product, index) => (
-                    <tr key={product.id} className="product-row" onClick={() => openEditProduct(product)}>
-                      <td><div className="product-cell"><div className={`product-avatar product-color-${index % 5}`}>{product.name.charAt(0).toUpperCase()}</div><strong>{product.name}</strong></div></td>
-                      <td><span className="sku-text">{product.sku}</span></td><td><span className="category-pill">{product.category}</span></td><td className="supplier-text">{product.supplier || "—"}</td>
-                      <td className="align-right price-cell">{money.format(Number(product.unit_price))}</td><td className="align-right quantity-cell">{product.quantity} <span>units</span></td>
-                      <td><StockStatus quantity={product.quantity} minimum={minimumStockQuantity} /></td>
-                      <td><button className="row-edit" onClick={(event) => { event.stopPropagation(); openEditProduct(product); }} aria-label={`Edit ${product.name}`}><ChevronDown size={15} /></button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="table-footer"><span>Showing <strong>{filteredProducts.length ? 1 : 0}–{filteredProducts.length}</strong> of <strong>{products.length}</strong> products</span><span>Minimum stock: <strong>{minimumStockQuantity} units</strong></span></div>
-          </section>
-          <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><span><ShieldCheck size={13} /> Your inventory is private to your account</span></footer>
-          </>}
-
-          {activeView === "suppliers" && <>
-            <div className="page-heading">
-              <div>
-                <div className="eyebrow muted-eyebrow">YOUR SUPPLY NETWORK</div>
-                <h1>Suppliers</h1>
-                <p>See suppliers recorded on your products and the stock linked to each one.</p>
-              </div>
-              <button className="button button-primary add-button" type="button" onClick={openNewProduct}><Plus size={17} /> Add product</button>
-            </div>
-            {pageError && <div className="page-alert"><AlertCircle size={17} />{pageError}<button onClick={() => setPageError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
-            {productsLoading ? (
-              <div className="section-card section-loading"><span className="loading-dot" />Loading suppliers…</div>
-            ) : suppliers.length === 0 ? (
-              <section className="section-card section-empty">
-                <div className="empty-icon"><Truck size={21} /></div>
-                <h2>No suppliers yet</h2>
-                <p>Add supplier names when creating or editing products. They’ll appear here automatically.</p>
-                <button className="button button-primary" type="button" onClick={openNewProduct}><Plus size={16} /> Add a product</button>
-              </section>
-            ) : (
-              <section className="section-card">
-                <div className="section-card-heading"><div><h2>All suppliers <span className="table-count">{suppliers.length}</span></h2><p>Supplier summaries are based on your product records.</p></div></div>
-                <div className="supplier-list">
-                  {suppliers.map((supplier) => (
-                    <article className="supplier-row" key={supplier.name}>
-                      <div className="supplier-avatar"><Truck size={18} /></div>
-                      <div className="supplier-name"><strong>{supplier.name}</strong><span>{supplier.productCount} {supplier.productCount === 1 ? "product" : "products"}</span></div>
-                      <div className="supplier-metric"><span>Units</span><strong>{supplier.units.toLocaleString()}</strong></div>
-                      <div className="supplier-metric"><span>Stock value</span><strong>{money.format(supplier.inventoryValue)}</strong></div>
-                      <button className="toolbar-button supplier-view-button" type="button" onClick={() => { setSearch(supplier.name); setCategoryFilter("All categories"); navigateTo("inventory"); }}>View products</button>
-                    </article>
-                  ))}
-                </div>
-              </section>
-            )}
-            <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><span>Supplier details come from your product catalog</span></footer>
-          </>}
-
-          {activeView === "settings" && <>
-            <div className="page-heading">
-              <div>
-                <div className="eyebrow muted-eyebrow">YOUR WORKSPACE</div>
-                <h1>Settings</h1>
-                <p>Manage your account details and inventory preferences.</p>
-              </div>
-            </div>
-            <div className="settings-grid">
-              <section className="section-card settings-card">
-                <div className="section-card-heading"><div><h2>Account</h2><p>Your signed-in account details.</p></div><span className="settings-icon"><ShieldCheck size={17} /></span></div>
-                <div className="settings-detail"><span>Email address</span><strong>{session.user.email}</strong></div>
-                <div className="settings-detail"><span>Workspace plan</span><strong>Free</strong></div>
-              </section>
-              <section className="section-card settings-card">
-                <div className="section-card-heading"><div><h2>Inventory alerts</h2><p>Choose when a product is considered low stock.</p></div><span className="settings-icon"><AlertCircle size={17} /></span></div>
-                <label className="field threshold-field">Low stock threshold (units)
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={minimumStockQuantity}
-                    onChange={(event) => {
-                      const nextThreshold = Number(event.target.value);
-                      if (!Number.isInteger(nextThreshold) || nextThreshold < 0) return;
-                      setMinimumStockQuantity(nextThreshold);
-                      window.localStorage.setItem(`b2g-stock-threshold:${session.user.id}`, String(nextThreshold));
-                    }}
-                  />
-                </label>
-                <p className="settings-help">Products below this quantity appear in your stock alerts. This preference is saved in this browser.</p>
-              </section>
-            </div>
-            <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><button className="settings-signout" type="button" onClick={() => void handleSignOut()}><LogOut size={14} /> Sign out</button></footer>
-          </>}
-
-          {activeView === "plans" && <>
-            <div className="page-heading">
-              <div>
-                <div className="eyebrow muted-eyebrow">SIMPLE PLAN OPTIONS</div>
-                <h1>Plans</h1>
-                <p>Pick the level that fits your inventory workflow.</p>
-              </div>
-            </div>
-            {planNotice && <div className="plan-notice" role="status">{planNotice}</div>}
-            <div className="plan-grid">
-              <article className="plan-card">
-                <span className="plan-label">START HERE</span><h2>Free</h2><p className="plan-price">$0 <span>/ forever</span></p>
-                <p className="plan-description">Manage your inventory and keep stock details in one place.</p>
-                <button className="button button-quiet plan-action" type="button" onClick={() => navigateTo("inventory")}>Current plan</button>
-              </article>
-              <article className="plan-card">
-                <span className="plan-label">SEE IT IN ACTION</span><h2>Demo</h2><p className="plan-price">Free <span>/ guided demo</span></p>
-                <p className="plan-description">Explore the workspace and see how inventory tracking works.</p>
-                <button className="button button-quiet plan-action" type="button" onClick={() => navigateTo("inventory")}>Explore the app</button>
-              </article>
-              <article className="plan-card plan-featured">
-                <span className="plan-label">FOR GROWING TEAMS</span><h2>Basic</h2><p className="plan-price">$50 <span>/ year</span></p>
-                <p className="plan-description">A straightforward annual option for your inventory workflow.</p>
-                <button className="button button-primary plan-action" type="button" onClick={() => setPlanNotice("Online billing is not set up yet. Your current Free plan remains active.")}>Choose Basic</button>
-              </article>
-              <article className="plan-card">
-                <span className="plan-label">FOR MORE CAPACITY</span><h2>Premium</h2><p className="plan-price">$345 <span>/ year</span></p>
-                <p className="plan-description">An expanded annual plan for businesses ready to grow.</p>
-                <button className="button button-primary plan-action" type="button" onClick={() => setPlanNotice("Online billing is not set up yet. Your current Free plan remains active.")}>Choose Premium</button>
-              </article>
-            </div>
-            <footer className="page-footer"><span>B2G INVENTORY <span className="footer-dot">·</span> A little more in control.</span><span>Paid plan checkout is not yet available.</span></footer>
-          </>}
+        <div className="page-content">
+          {pageError && <div className="page-alert"><AlertCircle size={17} />{pageError}<button onClick={() => setPageError("")} aria-label="Dismiss"><X size={15} /></button></div>}
+          {importMessage && <div className="import-feedback" role="status">{importMessage}</div>}
+          {view !== "dashboard" && <div className="table-toolbar"><label className="search-field"><Search size={16} /><input type="search" placeholder={`Search ${SHEETS.find((s) => s.key === view)?.label ?? ""}...`} value={search} onChange={(e) => setSearch(e.target.value)} /></label></div>}
+          {loading ? <div className="section-loading"><span className="loading-dot" />Loading workbook data…</div>
+            : view === "dashboard" ? <Dashboard data={data} />
+            : view === "materials" ? <MaterialsTable rows={filtered.materials} />
+            : view === "assets" ? <AssetsTable rows={filtered.assets} />
+            : view === "requests" ? <RequestsTable rows={filtered.requests} />
+            : view === "materialMovements" ? <MaterialMovesTable rows={filtered.materialMovements} />
+            : view === "assetMovements" ? <AssetMovesTable rows={filtered.assetMovements} />
+            : view === "projectSites" ? <ProjectsTable rows={filtered.projectSites} data={data} />
+            : view === "checkSchedule" ? <ChecksTable rows={filtered.checkSchedule} />
+            : <VerifyTable rows={filtered.verification} />}
+          <footer className="page-footer"><span>B2G Engineering <span className="footer-dot">·</span> Stock Inventory Workbook</span><span><ShieldCheck size={13} /> Private to your account</span></footer>
         </div>
       </section>
-
-      {modalOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}>
-        <section className="product-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-          <div className="modal-heading"><div><div className="eyebrow muted-eyebrow">{editingProduct ? "UPDATE YOUR CATALOG" : "GROW YOUR CATALOG"}</div><h2 id="modal-title">{editingProduct ? "Edit product" : "Add a product"}</h2><p>Keep your stock details up to date.</p></div><button className="icon-button" onClick={() => setModalOpen(false)} aria-label="Close dialog"><X size={19} /></button></div>
-          <form onSubmit={saveProduct}>
-            <div className="form-grid">
-              <label className="field full-field">Product name<input autoFocus required maxLength={120} placeholder="e.g. Everyday tote bag" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-              <label className="field">SKU<input required maxLength={40} placeholder="e.g. BAG-001" value={draft.sku} onChange={(event) => setDraft({ ...draft, sku: event.target.value })} /></label>
-              <label className="field">Category<input required maxLength={60} placeholder="e.g. Accessories" value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })} /></label>
-              <label className="field">Quantity in stock<input type="number" min="0" step="1" required value={draft.quantity} onChange={(event) => setDraft({ ...draft, quantity: Number(event.target.value) })} /></label>
-              <label className="field">Unit price ($)<input type="number" min="0" step="0.01" required value={draft.unit_price} onChange={(event) => setDraft({ ...draft, unit_price: Number(event.target.value) })} /></label>
-              <label className="field full-field">Supplier <span className="optional-label">Optional</span><input maxLength={120} placeholder="e.g. Northstar Goods" value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })} /></label>
-            </div>
-            <div className="modal-actions">{editingProduct && <button type="button" className="delete-button" onClick={() => void deleteProduct(editingProduct)}>Delete product</button>}<button type="button" className="button button-quiet" onClick={() => setModalOpen(false)}>Cancel</button><button type="submit" className="button button-primary" disabled={savingProduct}>{savingProduct ? "Saving…" : editingProduct ? "Save changes" : "Add product"}</button></div>
-          </form>
-        </section>
-      </div>}
     </main>
   );
 }
 
-function Brand() {
-  return <div className="brand"><div className="brand-mark"><Boxes size={19} strokeWidth={2.2} /></div><span>B2G INVENTORY</span></div>;
+function NavIcon({ k }: { k: SheetKey }) {
+  const map: Record<SheetKey, ReactNode> = { dashboard: <LayoutDashboard size={18} />, materials: <Boxes size={18} />, assets: <Wrench size={18} />, requests: <FileSpreadsheet size={18} />, materialMovements: <ArrowUpDown size={18} />, assetMovements: <Truck size={18} />, projectSites: <Package size={18} />, checkSchedule: <CalendarClock size={18} />, verification: <ClipboardCheck size={18} /> };
+  return map[k];
 }
 
-function StockStatus({ quantity, minimum }: { quantity: number; minimum: number }) {
-  if (quantity === 0) return <span className="status-pill status-out"><span />Out of stock</span>;
-  if (quantity < minimum) return <span className="status-pill status-low"><span />Low stock</span>;
-  return <span className="status-pill status-in"><span />In stock</span>;
+function AuthView(p: { configured: boolean; authMode: "signin" | "signup"; setAuthMode: (m: "signin" | "signup") => void; email: string; setEmail: (v: string) => void; password: string; setPassword: (v: string) => void; authError: string; authMessage: string; authSubmitting: boolean; handleAuth: (e: FormEvent) => void }) {
+  return (
+    <main className="auth-page">
+      <div className="auth-side"><Brand /><div className="auth-copy"><div className="eyebrow">B2G ENGINEERING</div><h1>Stock Inventory<br /><span>Workbook Dashboard</span></h1><p>Materials, returnable assets/tools, requests, project sites, movements, and verification control — aligned to the B2G workbook.</p></div></div>
+      <section className="auth-panel"><div className="auth-card"><div className="auth-heading"><div className="auth-glyph"><Boxes size={22} /></div><h2>{p.authMode === "signin" ? "Sign in" : "Create account"}</h2><p>Access your private B2G inventory workspace.</p></div>
+        <form className="auth-form" onSubmit={p.handleAuth}>
+          <label htmlFor="email">Email</label><input id="email" type="email" required value={p.email} onChange={(e) => p.setEmail(e.target.value)} placeholder="you@company.com" />
+          <label htmlFor="password">Password</label><input id="password" type="password" required minLength={6} value={p.password} onChange={(e) => p.setPassword(e.target.value)} placeholder="Password" />
+          {p.authError && <div className="form-alert error-alert"><AlertCircle size={16} />{p.authError}</div>}
+          {p.authMessage && <div className="form-alert success-alert"><Check size={16} />{p.authMessage}</div>}
+          {!p.configured && <div className="setup-note">Add Supabase variables from <code>.env.example</code> to <code>.env.local</code>.</div>}
+          <button className="button button-primary auth-submit" type="submit" disabled={p.authSubmitting}>{p.authSubmitting ? "Please wait…" : p.authMode === "signin" ? "Sign in" : "Create account"}</button>
+        </form>
+        <div className="auth-switch">{p.authMode === "signin" ? "New here?" : "Have an account?"}<button type="button" onClick={() => p.setAuthMode(p.authMode === "signin" ? "signup" : "signin")}>{p.authMode === "signin" ? "Create account" : "Sign in"}</button></div>
+      </div></section>
+    </main>
+  );
+}
+
+function Brand() { return <div className="brand"><div className="brand-mark"><Boxes size={19} strokeWidth={2.2} /></div><span>B2G INVENTORY</span></div>; }
+
+function Dashboard({ data }: { data: DataState }) {
+  const inventoryValue = data.materials.reduce((s, r) => s + num(r.stock_value_usd), 0);
+  const lowOut = data.materials.filter((r) => /low|no stock|out/i.test(r.stock_status)).length;
+  const siteStock = data.materials.filter((r) => /site/i.test(r.stock_status)).length;
+  const availableAssets = data.assets.filter((r) => /available/i.test(r.availability_flag || r.status)).length;
+  const deployed = data.assets.filter((r) => /deployed|issued|in use/i.test(r.availability_flag || r.status)).length;
+  const hold = data.assets.filter((r) => /hold|maintenance|repair/i.test(r.availability_flag || r.status)).length;
+  const awaiting = data.requests.filter((r) => /pending|await/i.test(r.approval_status) || /await/i.test(r.issue_status)).length;
+  const openIssue = data.requests.filter((r) => /approved/i.test(r.approval_status) && num(r.balance_to_issue) > 0).length;
+  const overdue = data.requests.filter((r) => r.due_return_date && new Date(r.due_return_date) < new Date() && !/returned|closed|complete/i.test(r.issue_status)).length;
+  const completedCycles = data.checkSchedule.filter((r) => /completed/i.test(r.check_status)).length;
+  const dueSoon = data.checkSchedule.filter((r) => /due|overdue/i.test(r.check_status)).length;
+  const exceptions = data.verification.filter((r) => /variance|missing|mismatch/i.test(r.verification_result)).length;
+  const openActions = data.verification.filter((r) => /open|progress|escalat/i.test(r.action_status)).length;
+  return (
+    <>
+      <div className="page-heading"><div><div className="eyebrow muted-eyebrow">LIVE WORKBOOK OVERVIEW</div><h1>Dashboard</h1><p>Materials, returnable assets/tools, requests, project sites, and control exceptions.</p></div></div>
+      <div className="stats-grid">
+        <Stat icon={<Boxes size={17} />} label="Material Stock Records" value={String(data.materials.length)} foot="From Materials Register" tone="blue" />
+        <Stat icon={<span className="currency-symbol">$</span>} label="Inventory Value (USD)" value={money.format(inventoryValue)} foot="Calculated stock value" tone="purple" />
+        <Stat icon={<AlertCircle size={17} />} label="Low / Out Stock" value={String(lowOut)} foot={`Site stock records: ${siteStock}`} tone={lowOut ? "warn" : "good"} />
+        <Stat icon={<Wrench size={17} />} label="Assets / Tools" value={String(data.assets.length)} foot={`Available ${availableAssets} · Hold ${hold}`} tone="blue" />
+        <Stat icon={<Truck size={17} />} label="Deployed Assets" value={String(deployed)} foot="Issued / in use" tone="neutral" />
+        <Stat icon={<FileSpreadsheet size={17} />} label="Requests" value={String(data.requests.length)} foot={`Awaiting ${awaiting} · Open to issue ${openIssue}`} tone={awaiting || openIssue ? "warn" : "good"} />
+        <Stat icon={<AlertCircle size={17} />} label="Overdue Returns" value={String(overdue)} foot="Returnable items past due" tone={overdue ? "warn" : "good"} />
+        <Stat icon={<ClipboardCheck size={17} />} label="Check Cycles" value={String(completedCycles)} foot={`Due/overdue soon: ${dueSoon}`} tone={dueSoon ? "warn" : "good"} />
+        <Stat icon={<AlertCircle size={17} />} label="Verification Exceptions" value={String(exceptions)} foot={`Open corrective actions: ${openActions}`} tone={exceptions || openActions ? "warn" : "good"} />
+      </div>
+      <section className="inventory-card"><div className="inventory-card-heading"><h2>Management attention</h2></div>
+        <div style={{ padding: "0 19px 18px", color: "#5e6f82", fontSize: 11, lineHeight: 1.7 }}>
+          Replenish low/out stock, complete approved pending issues, clear overdue returns, inspect/calibrate assets marked HOLD, complete due checks, investigate variances, confirm no post-freeze movements, and close corrective actions with approval references.
+        </div>
+      </section>
+    </>
+  );
+}
+function Stat({ icon, label, value, foot, tone }: { icon: ReactNode; label: string; value: string; foot: string; tone: string }) {
+  return <article className="stat-card"><div className="stat-top"><span className={`stat-icon ${tone === "warn" ? "alert-icon" : tone === "good" ? "units-icon" : tone === "purple" ? "value-icon" : "inventory-icon"}`}>{icon}</span></div><div className="stat-value">{value}</div><div className="stat-label">{label}</div><div className="stat-foot"><span className={`stat-dot ${tone === "warn" ? "orange-dot" : tone === "good" ? "green-dot" : tone === "purple" ? "purple-dot" : "blue-dot"}`} /> {foot}</div></article>;
+}
+
+function TableWrap({ cols, children, count }: { cols: string[]; children: ReactNode; count: number }) {
+  return <section className="inventory-card"><div className="table-wrap"><table className="inventory-sheet-table"><thead><tr>{cols.map((c) => <th key={c}>{c}</th>)}</tr></thead><tbody>{children}</tbody></table></div><div className="table-footer"><span>Showing <strong>{count}</strong> rows</span></div></section>;
+}
+const EmptyRow = ({ cols }: { cols: number }) => <tr><td colSpan={cols}><div className="empty-state"><div className="empty-icon"><Package size={21} /></div><strong>No records</strong><span>Upload the B2G workbook or add records to this register.</span></div></td></tr>;
+
+function MaterialsTable({ rows }: { rows: Material[] }) {
+  const cols = ["Stock Record ID","SKU","Item Description","Category","UOM","Location","Min","Opening","In","Out","On Hand","Approved Pending","Available","Stock Status","Last Movement","Supplier","Unit Cost","Stock Value","Remarks"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td>{r.stock_record_id || "—"}</td><td className="sku-text">{r.sku}</td><td>{r.item_description}</td><td>{r.category}</td><td>{r.uom}</td><td>{r.location}</td><td className="align-right">{num(r.minimum_stock)}</td><td className="align-right">{num(r.opening_balance)}</td><td className="align-right">{num(r.total_in)}</td><td className="align-right">{num(r.total_out)}</td><td className="align-right quantity-cell">{num(r.on_hand)}</td><td className="align-right">{num(r.approved_pending)}</td><td className="align-right">{num(r.available)}</td><td><span className={pillClass(r.stock_status)}>{r.stock_status || "—"}</span></td><td>{dateFmt(r.last_movement)}</td><td>{r.preferred_supplier || "—"}</td><td className="align-right">{money.format(num(r.unit_cost_usd))}</td><td className="align-right">{money.format(num(r.stock_value_usd))}</td><td>{r.remarks || "—"}</td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+function AssetsTable({ rows }: { rows: Asset[] }) {
+  const cols = ["Asset ID","Category","Asset / Tool","Make / Model","Serial","Location","Project","Assigned To","Condition","Status","Due Date","Last Return","Inspection Due","Calibration Due","Flag","Remarks"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td className="sku-text">{r.asset_id}</td><td>{r.category}</td><td>{r.asset_name}</td><td>{r.make_model || "—"}</td><td>{r.serial_no || "—"}</td><td>{r.current_location || r.home_location || "—"}</td><td>{r.project_id || "—"}</td><td>{r.assigned_to || "—"}</td><td>{r.condition || "—"}</td><td><span className={pillClass(r.status)}>{r.status || "—"}</span></td><td>{dateFmt(r.due_date)}</td><td>{dateFmt(r.last_return)}</td><td>{dateFmt(r.inspection_due)}</td><td>{dateFmt(r.calibration_due)}</td><td><span className={pillClass(r.availability_flag)}>{r.availability_flag || "—"}</span></td><td>{r.remarks || "—"}</td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+function RequestsTable({ rows }: { rows: RequestRow[] }) {
+  const cols = ["Request ID","Date","Type","Project","Requester","Item / Asset","Description","Qty Req","Approval","Approved Qty","Issue Status","Qty Issued","Balance","Due / Return","Remarks"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td className="sku-text">{r.request_id}</td><td>{dateFmt(r.request_date)}</td><td>{r.inventory_type}</td><td>{r.project_id || "—"}</td><td>{r.requester || "—"}</td><td>{r.item_asset_id || "—"}</td><td>{r.description || "—"}</td><td className="align-right">{num(r.qty_requested)}</td><td><span className={pillClass(r.approval_status)}>{r.approval_status || "—"}</span></td><td className="align-right">{num(r.approved_qty)}</td><td><span className={pillClass(r.issue_status)}>{r.issue_status || "—"}</span></td><td className="align-right">{num(r.qty_issued)}</td><td className="align-right">{num(r.balance_to_issue)}</td><td>{dateFmt(r.due_return_date)}</td><td>{r.remarks || "—"}</td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+function MaterialMovesTable({ rows }: { rows: MaterialMovement[] }) {
+  const cols = ["Movement ID","Date","Request","Type","SKU","Description","Qty","From","To","Project","Handed Over","Received","Unit Cost","Value","Check","Remarks"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td className="sku-text">{r.movement_id || "—"}</td><td>{dateFmt(r.transaction_date)}</td><td>{r.request_id || "—"}</td><td><span className={pillClass(r.movement_type)}>{r.movement_type}</span></td><td className="sku-text">{r.sku}</td><td>{r.item_description || "—"}</td><td className="align-right">{num(r.quantity)}</td><td>{r.from_location || "—"}</td><td>{r.to_location || "—"}</td><td>{r.project_id || "—"}</td><td>{r.handed_over_by || "—"}</td><td>{r.received_by || "—"}</td><td className="align-right">{money.format(num(r.unit_cost_usd))}</td><td className="align-right">{money.format(num(r.movement_value_usd))}</td><td><span className={pillClass(r.entry_check)}>{r.entry_check || "—"}</span></td><td>{r.remarks || "—"}</td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+function AssetMovesTable({ rows }: { rows: AssetMovement[] }) {
+  const cols = ["Movement ID","Date","Request","Action","Asset ID","Asset / Tool","From","To","Project","Assigned To","Condition Out/In","Due","Returned","Approved By","Remarks"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td className="sku-text">{r.movement_id || "—"}</td><td>{dateFmt(r.movement_date)}</td><td>{r.request_id || "—"}</td><td><span className={pillClass(r.action)}>{r.action}</span></td><td className="sku-text">{r.asset_id}</td><td>{r.asset_name || "—"}</td><td>{r.from_location || "—"}</td><td>{r.to_location || "—"}</td><td>{r.project_id || "—"}</td><td>{r.assigned_to || "—"}</td><td>{[r.condition_out, r.condition_in].filter(Boolean).join(" / ") || "—"}</td><td>{dateFmt(r.due_date)}</td><td>{dateFmt(r.return_date)}</td><td>{r.approved_by || "—"}</td><td>{r.remarks || "—"}</td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+function ProjectsTable({ rows, data }: { rows: ProjectSite[]; data: DataState }) {
+  const cols = ["Project ID","Project Name","Client","Site Location","Manager","Start","End","Status","Site Store","Open Requests","Notes"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td className="sku-text">{r.project_id}</td><td>{r.project_name || "—"}</td><td>{r.client || "—"}</td><td>{r.site_location || "—"}</td><td>{r.project_manager || "—"}</td><td>{dateFmt(r.start_date)}</td><td>{dateFmt(r.end_date)}</td><td><span className={pillClass(r.status)}>{r.status || "—"}</span></td><td>{r.site_store_location || "—"}</td><td className="align-right">{data.requests.filter((x) => x.project_id === r.project_id && !/closed|complete|cancel/i.test(x.approval_status + " " + x.issue_status)).length}</td><td>{r.notes || "—"}</td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+function ChecksTable({ rows }: { rows: CheckSchedule[] }) {
+  const cols = ["Check ID","Period","Frequency","Scope","Location","Planned","Actual","Lead","Independent","Status","Lines Planned","Verified","Exceptions","Open Actions","Next Due","Outcome"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td className="sku-text">{r.check_id}</td><td>{r.check_period || "—"}</td><td>{r.frequency || "—"}</td><td>{r.check_scope || "—"}</td><td>{r.location || "—"}</td><td>{dateFmt(r.planned_date)}</td><td>{dateFmt(r.actual_date)}</td><td>{r.lead_verifier || "—"}</td><td>{r.independent_checker || "—"}</td><td><span className={pillClass(r.check_status)}>{r.check_status || "—"}</span></td><td className="align-right">{num(r.lines_planned)}</td><td className="align-right">{num(r.lines_verified)}</td><td className="align-right">{num(r.exceptions)}</td><td className="align-right">{num(r.open_actions)}</td><td>{dateFmt(r.next_check_due)}</td><td><span className={pillClass(r.verification_outcome)}>{r.verification_outcome || "—"}</span></td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+function VerifyTable({ rows }: { rows: VerificationLine[] }) {
+  const cols = ["Line","Check ID","Date","Location","Type","Item/Asset","Description","Cut-off Qty","Physical Qty","Variance","Result","Cause","Corrective Action","Responsible","Target","Action Status","Verified By"];
+  return <TableWrap cols={cols} count={rows.length}>{rows.length ? rows.map((r) => <tr key={r.id}><td className="sku-text">{r.check_line_id}</td><td>{r.check_id}</td><td>{dateFmt(r.check_date)}</td><td>{r.location || "—"}</td><td>{r.inventory_type || "—"}</td><td className="sku-text">{r.item_asset_id || "—"}</td><td>{r.description || "—"}</td><td className="align-right">{r.system_qty_cutoff ?? "—"}</td><td className="align-right">{r.physical_qty ?? "—"}</td><td className="align-right">{r.count_variance ?? "—"}</td><td><span className={pillClass(r.verification_result)}>{r.verification_result || "—"}</span></td><td>{r.variance_cause || "—"}</td><td>{r.corrective_action || "—"}</td><td>{r.responsible || "—"}</td><td>{dateFmt(r.target_date)}</td><td><span className={pillClass(r.action_status)}>{r.action_status || "—"}</span></td><td>{r.verified_by || "—"}</td></tr>) : <EmptyRow cols={cols.length} />}</TableWrap>;
+}
+
+function parseSheet(kind: SheetKey, headers: string[], body: unknown[][]): { table: string | null; rows: Record<string, unknown>[] } {
+  const h = headers;
+  const col = (...a: string[]) => findHeader(h, a);
+  const used = new Set<number>();
+  const g = (r: unknown[], ...a: string[]) => { const i = col(...a); if (i >= 0) used.add(i); return i >= 0 ? r[i] : undefined; };
+  const baseExtras = (r: unknown[]) => { const o: Record<string, Json> = {}; h.forEach((head, i) => { if (!used.has(i) && txt(r[i])) o[head] = toJson(r[i]); }); return o; };
+  const nonEmpty = body.filter((r) => r.some((c) => txt(c)));
+
+  if (kind === "materials") {
+    return { table: "materials", rows: nonEmpty.map((r, i) => {
+      used.clear();
+      const sku = txt(g(r, "SKU")) || `SKU-${i + 1}`;
+      const desc = txt(g(r, "Item Description", "Description", "Item"));
+      const unitCost = num(g(r, "Unit Cost (USD)", "Unit Cost"));
+      const onHand = num(g(r, "On Hand"));
+      return {
+        stock_record_id: txt(g(r, "Stock Record ID")), sku, item_description: desc, category: txt(g(r, "Category")),
+        uom: txt(g(r, "UOM")) || "pcs", location: txt(g(r, "Location")) || "Central Warehouse", bin_location: txt(g(r, "Bin Location")),
+        minimum_stock: num(g(r, "Minimum Stock")), opening_balance: num(g(r, "Opening Balance")), total_in: num(g(r, "Total In")),
+        total_out: num(g(r, "Total Out")), on_hand: onHand, approved_pending: num(g(r, "Approved Pending")),
+        available: num(g(r, "Available")), stock_status: txt(g(r, "Stock Status")), last_movement: isoDate(g(r, "Last Movement")),
+        preferred_supplier: txt(g(r, "Preferred Supplier", "Supplier")), unit_cost_usd: unitCost,
+        stock_value_usd: num(g(r, "Stock Value (USD)", "Stock Value")) || onHand * unitCost, remarks: txt(g(r, "Remarks", "Notes")), extra_data: baseExtras(r),
+      };
+    }) };
+  }
+  if (kind === "assets") {
+    return { table: "assets", rows: nonEmpty.map((r, i) => {
+      used.clear();
+      return {
+        asset_id: txt(g(r, "Asset ID")) || `AST-${i + 1}`, category: txt(g(r, "Category")), asset_name: txt(g(r, "Asset / Tool Name", "Asset Name", "Asset / Tool")),
+        make_model: txt(g(r, "Make / Model")), serial_no: txt(g(r, "Serial No.", "Serial No")), uom: txt(g(r, "UOM")) || "unit",
+        ownership: txt(g(r, "Ownership")) || "Owned", purchase_date: isoDate(g(r, "Purchase Date")), original_cost_usd: num(g(r, "Original Cost (USD)", "Original Cost")),
+        home_location: txt(g(r, "Home Location")) || "Central Warehouse", current_location: txt(g(r, "Current Location")),
+        project_id: txt(g(r, "Project ID")), assigned_to: txt(g(r, "Assigned To")), condition: txt(g(r, "Condition")) || "Good",
+        status: txt(g(r, "Status")) || "Available", deployment_start: isoDate(g(r, "Deployment Start")), due_date: isoDate(g(r, "Due Date")),
+        last_return: isoDate(g(r, "Last Return")), days_out: num(g(r, "Days Out")), last_movement: isoDate(g(r, "Last Movement")),
+        inspection_due: isoDate(g(r, "Inspection Due")), calibration_due: isoDate(g(r, "Calibration Due")),
+        availability_flag: txt(g(r, "Availability Flag")) || "AVAILABLE", remarks: txt(g(r, "Remarks", "Notes")), extra_data: baseExtras(r),
+      };
+    }) };
+  }
+  if (kind === "requests") {
+    return { table: "requests", rows: nonEmpty.map((r, i) => {
+      used.clear();
+      return {
+        request_id: txt(g(r, "Request ID")) || `REQ-${i + 1}`, request_date: isoDate(g(r, "Request Date")), inventory_type: txt(g(r, "Inventory Type")) || "Material",
+        project_id: txt(g(r, "Project ID")), project_site: txt(g(r, "Project / Site")), requester: txt(g(r, "Requester")), department: txt(g(r, "Department")),
+        required_date: isoDate(g(r, "Required Date")), priority: txt(g(r, "Priority")) || "Normal", item_asset_id: txt(g(r, "Item / Asset ID")),
+        description: txt(g(r, "Description")), uom: txt(g(r, "UOM")), qty_requested: num(g(r, "Qty Requested")), purpose: txt(g(r, "Purpose / Work Package", "Purpose")),
+        approver: txt(g(r, "Approver")), approval_status: txt(g(r, "Approval Status")) || "Pending", approved_qty: num(g(r, "Approved Qty")),
+        approval_date: isoDate(g(r, "Approval Date")), source_location: txt(g(r, "Source Location")) || "Central Warehouse",
+        issue_status: txt(g(r, "Issue Status")), qty_issued: num(g(r, "Qty Issued / Assigned", "Qty Issued")),
+        balance_to_issue: num(g(r, "Balance to Issue")), due_return_date: isoDate(g(r, "Due / Return Date")), remarks: txt(g(r, "Remarks", "Notes")), extra_data: baseExtras(r),
+      };
+    }) };
+  }
+  if (kind === "materialMovements") {
+    return { table: "material_movements", rows: nonEmpty.map((r) => {
+      used.clear();
+      const qty = num(g(r, "Quantity")); const unit = num(g(r, "Unit Cost (USD)", "Unit Cost"));
+      return {
+        movement_id: txt(g(r, "Movement ID")), transaction_date: isoDate(g(r, "Transaction Date")), request_id: txt(g(r, "Request ID")),
+        movement_type: txt(g(r, "Movement Type")) || "Receipt", sku: txt(g(r, "SKU")), item_description: txt(g(r, "Item Description", "Description")),
+        uom: txt(g(r, "UOM")), quantity: qty, from_location: txt(g(r, "From Location")), to_location: txt(g(r, "To Location")),
+        project_id: txt(g(r, "Project ID")), project_site: txt(g(r, "Project / Site")), handed_over_by: txt(g(r, "Handed Over By")),
+        received_by: txt(g(r, "Received By")), approval_doc_ref: txt(g(r, "Approval / Document Ref", "Approval / Doc Ref")),
+        unit_cost_usd: unit, movement_value_usd: num(g(r, "Movement Value (USD)", "Movement Value")) || qty * unit,
+        entry_check: txt(g(r, "Entry Check")), remarks: txt(g(r, "Remarks", "Notes")), extra_data: baseExtras(r),
+      };
+    }).filter((r) => r.sku || r.movement_id || r.item_description) };
+  }
+  if (kind === "assetMovements") {
+    return { table: "asset_movements", rows: nonEmpty.map((r) => {
+      used.clear();
+      return {
+        movement_id: txt(g(r, "Movement ID")), movement_date: isoDate(g(r, "Movement Date")), request_id: txt(g(r, "Request ID")),
+        action: txt(g(r, "Action")), asset_id: txt(g(r, "Asset ID")), asset_name: txt(g(r, "Asset / Tool Name", "Asset Name")),
+        from_location: txt(g(r, "From Location")), to_location: txt(g(r, "To Location")), project_id: txt(g(r, "Project ID")),
+        project_site: txt(g(r, "Project / Site")), assigned_to: txt(g(r, "Assigned To")), condition_out: txt(g(r, "Condition Out")),
+        condition_in: txt(g(r, "Condition In")), resulting_condition: txt(g(r, "Resulting Condition")), due_date: isoDate(g(r, "Due Date")),
+        return_date: isoDate(g(r, "Return Date")), approved_by: txt(g(r, "Approved By")), handover_ref: txt(g(r, "Handover Ref")),
+        entry_check: txt(g(r, "Entry Check")), remarks: txt(g(r, "Remarks", "Notes")), extra_data: baseExtras(r),
+      };
+    }).filter((r) => r.asset_id || r.movement_id) };
+  }
+  if (kind === "projectSites") {
+    return { table: "project_sites", rows: nonEmpty.map((r, i) => {
+      used.clear();
+      return {
+        project_id: txt(g(r, "Project ID")) || `PRJ-${i + 1}`, project_name: txt(g(r, "Project Name")), client: txt(g(r, "Client")),
+        site_location: txt(g(r, "Site Location")), project_manager: txt(g(r, "Project Manager")), start_date: isoDate(g(r, "Start Date")),
+        end_date: isoDate(g(r, "End Date")), status: txt(g(r, "Status")) || "Active", site_store_location: txt(g(r, "Site Store / Location", "Site Store")),
+        notes: txt(g(r, "Notes", "Remarks")), extra_data: baseExtras(r),
+      };
+    }) };
+  }
+  if (kind === "checkSchedule") {
+    return { table: "check_schedule", rows: nonEmpty.map((r, i) => {
+      used.clear();
+      return {
+        check_id: txt(g(r, "Check ID")) || `CHK-${i + 1}`, check_period: txt(g(r, "Check Period")), frequency: txt(g(r, "Frequency")) || "Monthly",
+        check_scope: txt(g(r, "Check Scope")) || "Full Count", location: txt(g(r, "Location")), planned_date: isoDate(g(r, "Planned Date")),
+        actual_date: isoDate(g(r, "Actual Date")), lead_verifier: txt(g(r, "Lead Verifier")), independent_checker: txt(g(r, "Independent Checker")),
+        check_status: txt(g(r, "Check Status")) || "Planned", lines_planned: num(g(r, "Lines Planned")), lines_verified: num(g(r, "Lines Verified")),
+        exceptions: num(g(r, "Count / Condition Exceptions", "Exceptions")), post_freeze_movement_lines: num(g(r, "Post-freeze Movement Lines")),
+        completion_pct: num(g(r, "Completion %")), open_actions: num(g(r, "Open Actions")), approved_by: txt(g(r, "Approved By")),
+        approval_date: isoDate(g(r, "Approval Date")), next_check_due: isoDate(g(r, "Next Check Due")),
+        verification_outcome: txt(g(r, "Verification Outcome")), notes: txt(g(r, "Notes", "Remarks")), extra_data: baseExtras(r),
+      };
+    }) };
+  }
+  if (kind === "verification") {
+    return { table: "verification_matrix", rows: nonEmpty.map((r, i) => {
+      used.clear();
+      const cutoff = g(r, "System Qty at Cut-off"); const phys = g(r, "Physical Qty");
+      return {
+        check_line_id: txt(g(r, "Check Line ID")) || `VFY-${i + 1}`, check_id: txt(g(r, "Check ID")), check_date: isoDate(g(r, "Check Date")),
+        frequency: txt(g(r, "Frequency")), location: txt(g(r, "Location")), inventory_type: txt(g(r, "Inventory Type")),
+        item_asset_id: txt(g(r, "Item / Asset ID")), description: txt(g(r, "Description")), uom: txt(g(r, "UOM")),
+        live_system_qty: cutoff == null && g(r, "Live System Qty") == null ? null : num(g(r, "Live System Qty")),
+        system_qty_cutoff: cutoff == null ? null : num(cutoff), live_vs_cutoff: g(r, "Live vs Cut-off Change") == null ? null : num(g(r, "Live vs Cut-off Change")),
+        physical_qty: phys == null ? null : num(phys), count_variance: g(r, "Count Variance") == null ? null : num(g(r, "Count Variance")),
+        variance_pct: g(r, "Variance %") == null ? null : num(g(r, "Variance %")),
+        live_system_condition: txt(g(r, "Live System Condition")), recorded_condition_cutoff: txt(g(r, "Recorded Condition at Cut-off")),
+        physical_condition: txt(g(r, "Physical Condition")), verification_result: txt(g(r, "Verification Result")) || "NOT COUNTED",
+        variance_cause: txt(g(r, "Variance Cause / Observation", "Variance Cause")), corrective_action: txt(g(r, "Corrective Action")),
+        responsible: txt(g(r, "Responsible")), target_date: isoDate(g(r, "Target Date")), action_status: txt(g(r, "Action Status")) || "Not Required",
+        verified_by: txt(g(r, "Verified By")), independent_checker: txt(g(r, "Independent Checker")),
+        adjustment_approval_ref: txt(g(r, "Adjustment / Approval Ref")), evidence_notes: txt(g(r, "Evidence / Notes", "Evidence")), extra_data: baseExtras(r),
+      };
+    }) };
+  }
+  return { table: null, rows: [] };
 }

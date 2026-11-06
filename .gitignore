@@ -6,6 +6,8 @@ build
 coverage
 .env*
 !.env.example
+*.xlsx
+*.xls
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
